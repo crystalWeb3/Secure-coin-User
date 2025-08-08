@@ -1,4 +1,4 @@
-import { ethers } from 'ethers';
+import { ethers } from "ethers";
 
 export interface WalletInfo {
   address: string;
@@ -12,15 +12,19 @@ export class WalletService {
 
   async connectWallet(): Promise<WalletInfo> {
     try {
-      if (typeof window === 'undefined' || !window.ethereum) {
-        throw new Error('No wallet detected. Please install MetaMask or another wallet.');
+      if (typeof window === "undefined" || !window.ethereum) {
+        throw new Error(
+          "No wallet detected. Please install MetaMask or another wallet."
+        );
       }
 
       // Request account access
-      const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' }) as string[];
-      
+      const accounts = (await window.ethereum.request({
+        method: "eth_requestAccounts",
+      })) as string[];
+
       if (!accounts || accounts.length === 0) {
-        throw new Error('No accounts found');
+        throw new Error("No accounts found");
       }
 
       const account = accounts[0];
@@ -41,55 +45,55 @@ export class WalletService {
       return {
         address: account,
         chainId: chainId,
-        isConnected: true
+        isConnected: true,
       };
     } catch (error) {
-      console.error('Error connecting wallet:', error);
+      console.error("Error connecting wallet:", error);
       throw error;
     }
   }
 
   async switchToBSCMainnet(): Promise<void> {
-    if (typeof window === 'undefined' || !window.ethereum) {
-      throw new Error('No wallet detected');
+    if (typeof window === "undefined" || !window.ethereum) {
+      throw new Error("No wallet detected");
     }
 
     try {
       // Try to switch to BSC Mainnet
       await window.ethereum.request({
-        method: 'wallet_switchEthereumChain',
-        params: [{ chainId: '0x38' }], // 56 in hex
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: "0x38" }], // 56 in hex
       });
     } catch (switchError: unknown) {
       // This error code indicates that the chain has not been added to MetaMask
       if (
-        typeof switchError === 'object' &&
+        typeof switchError === "object" &&
         switchError !== null &&
-        'code' in switchError &&
+        "code" in switchError &&
         (switchError as { code: number }).code === 4902
       ) {
         try {
           await window.ethereum.request({
-            method: 'wallet_addEthereumChain',
+            method: "wallet_addEthereumChain",
             params: [
               {
-                chainId: '0x38', // 56 in hex
-                chainName: 'Binance Smart Chain',
+                chainId: "0x38", // 56 in hex
+                chainName: "Binance Smart Chain",
                 nativeCurrency: {
-                  name: 'BNB',
-                  symbol: 'BNB',
+                  name: "BNB",
+                  symbol: "BNB",
                   decimals: 18,
                 },
-                rpcUrls: ['https://bsc-dataseed.binance.org/'],
-                blockExplorerUrls: ['https://bscscan.com/'],
+                rpcUrls: ["https://bsc-dataseed.binance.org/"],
+                blockExplorerUrls: ["https://bscscan.com/"],
               },
             ],
           });
         } catch (addError) {
-          throw new Error('Failed to add BSC Mainnet to wallet');
+          throw new Error("Failed to add BSC Mainnet to wallet");
         }
       } else {
-        throw new Error('Failed to switch to BSC Mainnet');
+        throw new Error("Failed to switch to BSC Mainnet");
       }
     }
   }
@@ -108,4 +112,4 @@ export class WalletService {
   }
 }
 
-export const walletService = new WalletService(); 
+export const walletService = new WalletService();

