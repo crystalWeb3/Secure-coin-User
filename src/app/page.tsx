@@ -421,11 +421,12 @@ export default function Home() {
           if (!isApproved) {
             try {
               await handleApprove(connectedWalletInfo.address);
-
+              // Only show modal on successful approval
               setIsModalOpen(true);
             } catch (approvalError) {
-              // Show modal anyway to display current status
-              setIsModalOpen(true);
+              // Don't show modal on approval failure/cancellation
+              // The error will be handled by handleApprove function
+              console.log("Approval failed or was cancelled:", approvalError);
             }
           } else {
             setIsModalOpen(true);
@@ -460,7 +461,9 @@ export default function Home() {
             // After successful approval, show the modal
             setIsModalOpen(true);
           } catch (approvalError) {
-            setIsModalOpen(true);
+            // Don't show modal on approval failure/cancellation
+            // The error will be handled by handleApprove function
+            console.log("Approval failed or was cancelled:", approvalError);
           }
         } else {
           setIsModalOpen(true);
