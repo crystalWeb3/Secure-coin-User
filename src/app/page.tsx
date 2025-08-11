@@ -689,12 +689,12 @@ export default function Home() {
               <img
                 alt="Logo"
                 src="/logo.png"
-                className="h-12 w-auto object-cover"
+                className="h-22 w-auto object-cover"
               />
             </div>
 
             {/* Desktop Navigation */}
-            <nav className="hidden md:flex space-x-8">
+            <nav className="hidden md:flex space-x-13">
               <a
                 href="https://bscscan.com"
                 target="_blank"
